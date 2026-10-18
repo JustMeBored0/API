@@ -1,0 +1,64 @@
+{
+  "$schema": "https://cdn.scalar.com/schema/scalar-config-next.json",
+  "scalar": "2.0.0",
+  "info": {
+    "title": "RESTful API"
+  },
+  "navigation": {
+    "header": [
+      {
+        "type": "link",
+        "title": "Documentation",
+        "to": "/introduction",
+        "align": "start"
+      },
+      {
+        "type": "link",
+        "title": "API Reference",
+        "to": "/api-reference",
+        "align": "start"
+      },
+      {
+        "type": "link",
+        "title": "Support",
+        "to": "https://scalar.com",
+        "style": "button",
+        "newTab": true,
+        "align": "end"
+      }
+    ],
+    "routes": {
+      "/": {
+        "type": "group",
+        "title": "Documentation",
+        "children": {
+          "/resources": {
+            "type": "page",
+            "title": "Zdroje API",
+            "filepath": "docs/resources.md"
+          },
+          "/data-formats": {
+            "type": "page",
+            "title": "Formáty dat",
+            "filepath": "docs/data-formats.md"
+          },
+          "/authentication": {
+            "type": "page",
+            "title": "Autentizace a oprávnění",
+            "filepath": "docs/authentication.md"
+          },
+          "/versioning": {
+            "type": "page",
+            "title": "Verzování",
+            "filepath": "docs/versioning.md"
+          }
+        }
+      },
+      "/api-reference": {
+        "type": "openapi",
+        "title": "API Reference",
+        "filepath": "openapi.yaml"
+      }
+    }
+  }
+}

@@ -1,0 +1,995 @@
+openapi: 3.1.0
+info:
+  title: Courses API
+  version: 1.0.0
+  description: |
+    REST API pro správu kurzů, lekcí, uživatelů a zápisů studentů do kurzů.
+
+    Zdroje: **Users**, **Courses**, **Lessons** a **Enrollments** (vazba M:N mezi uživateli a kurzy).
+
+    - Data: JSON, UTF-8, `camelCase`, časy v ISO 8601 (UTC).
+    - Autentizace: JWT `Bearer` token získaný přes `POST /api/v1/auth/login`.
+    - Verze: hlavní verze je v cestě (`/api/v1`).
+servers:
+  - url: https://api.example.com
+    description: Produkční server
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+    description: Přihlášení, obnovení a odhlášení.
+  - name: Courses
+    description: Kurzy.
+  - name: Lessons
+    description: Lekce patřící do kurzu.
+  - name: Enrollments
+    description: Zápisy studentů do kurzů (M:N).
+  - name: Users
+    description: Uživatelé.
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Získání JWT tokenu
+      description: Ověří e-mail a heslo a vrátí access token (15 minut) a refresh token (7 dní).
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: jana@example.com
+              password: tajneHeslo123
+      responses:
+        '200':
+          description: Přihlášení úspěšné, přihlašovací údaje jsou správné.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Tělo není validní JSON nebo chybí `email` či `password`.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: E-mail nebo heslo je špatně, nebo je účet deaktivován. Zpráva neprozrazuje, co přesně.
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: Z jedné IP adresy přišlo více než 10 pokusů o přihlášení za minutu.
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Obnovení tokenů
+      description: Vymění platný refresh token za nový pár tokenů. Starý refresh token se zneplatní (rotace).
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Vydán nový pár tokenů.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Chybí pole `refreshToken`.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Refresh token je neplatný, vypršel nebo už byl použit (v tom případě se zneplatní celá řada tokenů).
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Odhlášení
+      description: Zneplatní refresh token. Access token platí nejvýše do své expirace (15 minut).
+      operationId: logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '204':
+          description: Refresh token zneplatněn, odpověď nemá tělo.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Access token chybí, je neplatný nebo vypršel.
+  /api/v1/courses:
+    get:
+      tags: [Courses]
+      summary: Seznam kurzů (filtrace, stránkování)
+      description: Veřejný seznam kurzů. Podporuje fulltextový filtr a stránkování.
+      operationId: listCourses
+      security: []
+      parameters:
+        - name: q
+          in: query
+          description: Fulltextové filtrování podle názvu nebo popisu.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Stránkovaný seznam kurzů (může být prázdný).
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/XRateLimitRemaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoursePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`page` nebo `limit` není celé číslo v povoleném rozsahu.'
+    post:
+      tags: [Courses]
+      summary: Vytvoření nového kurzu
+      description: Vytvoří kurz. Přihlášený učitel se stane jeho vlastníkem. Smí `teacher` a `admin`.
+      operationId: createCourse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CourseInput'
+            example:
+              title: Úvod do REST
+              description: Základy návrhu API
+      responses:
+        '201':
+          description: Kurz vznikl. Hlavička `Location` obsahuje jeho URL.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Course'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Chybí povinné pole `title` nebo má špatný typ.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel má roli `student`, která kurzy vytvářet nesmí.
+  /api/v1/courses/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Courses]
+      summary: Detail konkrétního kurzu
+      operationId: getCourse
+      security: []
+      responses:
+        '200':
+          description: Kurz nalezen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Course'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz s daným `id` neexistuje.
+    put:
+      tags: [Courses]
+      summary: Úplná aktualizace kurzu
+      description: Nahradí všechna upravitelná pole kurzu. Smí vlastník kurzu (`teacher`) a `admin`.
+      operationId: updateCourse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CourseInput'
+      responses:
+        '200':
+          description: Kurz aktualizován.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Course'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Chybí povinné pole `title` nebo má pole špatný typ.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není vlastníkem kurzu ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz s daným `id` neexistuje.
+    delete:
+      tags: [Courses]
+      summary: Smazání kurzu
+      description: Smaže kurz včetně jeho lekcí a zápisů (kaskádově). Smí vlastník a `admin`.
+      operationId: deleteCourse
+      responses:
+        '204':
+          description: Kurz smazán, odpověď nemá tělo.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není vlastníkem kurzu ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz s daným `id` neexistuje.
+  /api/v1/courses/{id}/lessons:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Lessons]
+      summary: Lekce patřící do kurzu
+      description: Vrací lekce kurzu seřazené podle pole `order`.
+      operationId: listCourseLessons
+      security: []
+      responses:
+        '200':
+          description: Seznam lekcí (může být prázdný).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Lesson'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz s daným `id` neexistuje.
+    post:
+      tags: [Lessons]
+      summary: Přidání lekce ke kurzu
+      description: Přidá lekci do kurzu. Smí vlastník kurzu a `admin`.
+      operationId: createLesson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LessonInput'
+            example:
+              title: Co je REST
+              content: Úvodní lekce o principech REST.
+              order: 1
+      responses:
+        '201':
+          description: Lekce vznikla. Hlavička `Location` obsahuje její URL.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Chybí povinné pole `title` nebo má pole špatný typ.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není vlastníkem kurzu ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz s daným `id` neexistuje.
+  /api/v1/lessons/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Lessons]
+      summary: Detail lekce
+      operationId: getLesson
+      security: []
+      responses:
+        '200':
+          description: Lekce nalezena.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Lekce s daným `id` neexistuje.
+    patch:
+      tags: [Lessons]
+      summary: Částečná úprava lekce
+      description: Změní jen zaslaná pole. Smí vlastník kurzu a `admin`.
+      operationId: updateLesson
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LessonPatch'
+            example:
+              title: Co je REST (aktualizováno)
+      responses:
+        '200':
+          description: Lekce upravena.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lesson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Pole má špatný typ nebo tělo neobsahuje žádné pole.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není vlastníkem kurzu, do kterého lekce patří, ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Lekce s daným `id` neexistuje.
+    delete:
+      tags: [Lessons]
+      summary: Odstranění lekce
+      description: Smí vlastník kurzu a `admin`.
+      operationId: deleteLesson
+      responses:
+        '204':
+          description: Lekce odstraněna, odpověď nemá tělo.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není vlastníkem kurzu, do kterého lekce patří, ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Lekce s daným `id` neexistuje.
+  /api/v1/courses/{id}/enroll:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    post:
+      tags: [Enrollments]
+      summary: Zápis studenta do kurzu
+      description: |
+        Zapíše přihlášeného studenta do kurzu. Tělo požadavku je prázdné.
+        `admin` může zapsat jiného uživatele zasláním `userId`.
+      operationId: enrollInCourse
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+                  description: Jen pro `admin`. Jinak se použije přihlášený uživatel.
+      responses:
+        '201':
+          description: Zápis vznikl se stavem `active`.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Enrollment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel má roli `teacher`, nebo `userId` zaslal někdo, kdo není `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz (nebo uživatel z `userId`) neexistuje.
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Uživatel je v kurzu již zapsán (dvojice `userId` a `courseId` je jedinečná).
+    delete:
+      tags: [Enrollments]
+      summary: Zrušení zápisu v kurzu
+      description: Zruší zápis přihlášeného uživatele v kurzu. `admin` může zadat `userId` v dotazu.
+      operationId: unenrollFromCourse
+      parameters:
+        - name: userId
+          in: query
+          description: Jen pro `admin`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Zápis zrušen, odpověď nemá tělo.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz neexistuje, nebo v něm uživatel není zapsán.
+  /api/v1/courses/{id}/students:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Enrollments]
+      summary: Seznam zapsaných studentů v kurzu
+      description: Smí vlastník kurzu a `admin`.
+      operationId: listCourseStudents
+      responses:
+        '200':
+          description: Seznam studentů zapsaných v kurzu (může být prázdný).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není vlastníkem kurzu ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Kurz s daným `id` neexistuje.
+  /api/v1/users/{id}/courses:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Enrollments]
+      summary: Seznam kurzů daného studenta
+      description: Smí daný uživatel a `admin`.
+      operationId: listUserCourses
+      responses:
+        '200':
+          description: Seznam kurzů, ve kterých je uživatel zapsán (může být prázdný).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Course'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel žádá o kurzy někoho jiného a není `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Uživatel s daným `id` neexistuje.
+  /api/v1/enrollments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Enrollments]
+      summary: Detail zápisu
+      description: Smí vlastník zápisu, učitel kurzu a `admin`.
+      operationId: getEnrollment
+      responses:
+        '200':
+          description: Zápis nalezen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Enrollment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není studentem zápisu, učitelem kurzu ani `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Zápis s daným `id` neexistuje.
+    patch:
+      tags: [Enrollments]
+      summary: Změna stavu nebo známky zápisu
+      description: Smí učitel kurzu a `admin`.
+      operationId: updateEnrollment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollmentPatch'
+            example:
+              status: completed
+              grade: 1
+      responses:
+        '200':
+          description: Zápis upraven.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Enrollment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`status` není z povolených hodnot nebo `grade` je mimo rozsah 1 až 5.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel není učitelem kurzu ani `admin` (student nemůže měnit vlastní známku).
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Zápis s daným `id` neexistuje.
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: Seznam uživatelů (pouze admin)
+      operationId: listUsers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Stránkovaný seznam uživatelů.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel nemá roli `admin`.
+    post:
+      tags: [Users]
+      summary: Registrace nového uživatele
+      description: Vytvoří uživatele s rolí `student`. Nevyžaduje přihlášení.
+      operationId: createUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+            example:
+              name: Jana Nováková
+              email: jana@example.com
+              password: tajneHeslo123
+      responses:
+        '201':
+          description: Uživatel vznikl. Hlavička `Location` obsahuje jeho URL.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Chybí povinné pole, e-mail má špatný formát nebo je heslo kratší než 8 znaků.
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: Uživatel s tímto e-mailem již existuje.
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+    get:
+      tags: [Users]
+      summary: Detail profilu
+      description: Smí daný uživatel a `admin`.
+      operationId: getUser
+      responses:
+        '200':
+          description: Profil nalezen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel žádá o cizí profil a není `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Uživatel s daným `id` neexistuje.
+    put:
+      tags: [Users]
+      summary: Úprava údajů profilu
+      description: Smí daný uživatel a `admin`. Roli (`role`) může změnit jen `admin`.
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+      responses:
+        '200':
+          description: Profil upraven.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: Chybí povinné pole nebo má e-mail špatný formát.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel upravuje cizí profil, nebo se jako neadmin pokouší změnit roli.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Uživatel s daným `id` neexistuje.
+    delete:
+      tags: [Users]
+      summary: Deaktivace/smazání účtu
+      description: Účet se deaktivuje (`active` = `false`) a nelze se k němu přihlásit. Smí daný uživatel a `admin`.
+      operationId: deleteUser
+      responses:
+        '204':
+          description: Účet deaktivován, odpověď nemá tělo.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: Chybí nebo je neplatný token.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: Uživatel ruší cizí účet a není `admin`.
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: Uživatel s daným `id` neexistuje.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token z `POST /api/v1/auth/login`, platný 15 minut. Posílá se v hlavičce `Authorization`.
+  headers:
+    XRequestId:
+      description: Identifikátor požadavku pro dohledání v logu.
+      schema:
+        type: string
+    XRateLimitRemaining:
+      description: Zbývající počet požadavků v aktuálním okně.
+      schema:
+        type: integer
+    Location:
+      description: URL nově vytvořeného zdroje.
+      schema:
+        type: string
+        format: uri-reference
+    RetryAfter:
+      description: Počet sekund do dalšího pokusu.
+      schema:
+        type: integer
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: Identifikátor zdroje (UUID).
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      description: Číslo stránky od 1.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Limit:
+      name: limit
+      in: query
+      description: Počet položek na stránku.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+  responses:
+    BadRequest:
+      description: Neplatný požadavek.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Pole title je povinné.
+            details:
+              - field: title
+                issue: required
+    Unauthorized:
+      description: Chybí nebo je neplatný token.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Token je neplatný nebo vypršel.
+    Forbidden:
+      description: Nedostatečná oprávnění.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: FORBIDDEN
+            message: K této akci nemáte oprávnění.
+    NotFound:
+      description: Zdroj nenalezen.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: Zdroj neexistuje.
+    Conflict:
+      description: Konflikt s existujícími daty.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: CONFLICT
+            message: Zdroj již existuje.
+    TooManyRequests:
+      description: Překročen limit požadavků.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: RATE_LIMITED
+            message: Příliš mnoho požadavků.
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stabilní strojově čitelný identifikátor chyby.
+        message:
+          type: string
+          description: Text pro člověka.
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken, tokenType, expiresIn]
+      properties:
+        accessToken:
+          type: string
+          description: JWT access token.
+        refreshToken:
+          type: string
+          description: Refresh token (platnost 7 dní, rotuje se).
+        tokenType:
+          type: string
+          const: Bearer
+        expiresIn:
+          type: integer
+          description: Platnost access tokenu v sekundách.
+          examples: [900]
+    CourseInput:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: [string, 'null']
+    Course:
+      allOf:
+        - $ref: '#/components/schemas/CourseInput'
+        - type: object
+          required: [id, teacherId, createdAt]
+          properties:
+            id:
+              type: string
+              format: uuid
+            teacherId:
+              type: string
+              format: uuid
+              description: Vlastník kurzu (učitel).
+            createdAt:
+              type: string
+              format: date-time
+    CoursePage:
+      type: object
+      required: [data, page, limit, total]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Course'
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+    LessonInput:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        order:
+          type: integer
+          minimum: 1
+    LessonPatch:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+        content:
+          type: string
+        order:
+          type: integer
+          minimum: 1
+    Lesson:
+      allOf:
+        - $ref: '#/components/schemas/LessonInput'
+        - type: object
+          required: [id, courseId]
+          properties:
+            id:
+              type: string
+              format: uuid
+            courseId:
+              type: string
+              format: uuid
+    Enrollment:
+      type: object
+      required: [id, courseId, userId, status, enrolledAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        courseId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [active, completed, dropped]
+        grade:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 5
+        enrolledAt:
+          type: string
+          format: date-time
+    EnrollmentPatch:
+      type: object
+      minProperties: 1
+      properties:
+        status:
+          type: string
+          enum: [active, completed, dropped]
+        grade:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 5
+    UserCreate:
+      type: object
+      required: [name, email, password]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+    UserUpdate:
+      type: object
+      required: [name, email]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [student, teacher, admin]
+          description: Smí měnit jen `admin`.
+    User:
+      type: object
+      required: [id, name, email, role, active]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [student, teacher, admin]
+        active:
+          type: boolean
+    UserPage:
+      type: object
+      required: [data, page, limit, total]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
